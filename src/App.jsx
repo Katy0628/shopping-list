@@ -1,9 +1,25 @@
 import { useState, useEffect, useRef } from "react";
+import { initializeApp } from "firebase/app";
+import { getDatabase, ref, onValue, set, remove } from "firebase/database";
 
-// ── 本地儲存 ──────────────────────────────────────────────────────────────────
-const DB_KEY = "shoppingApp_v3";
-const loadDB = () => { try { return JSON.parse(localStorage.getItem(DB_KEY))||{}; } catch { return {}; } };
-const saveDB = d => localStorage.setItem(DB_KEY, JSON.stringify(d));
+const firebaseConfig = {
+  apiKey: "AIzaSyBqGzDkkxVe4WD2F4iwZv5uZMSCYcjwwEo",
+  authDomain: "shopping-list-aef6c.firebaseapp.com",
+  databaseURL: "https://shopping-list-aef6c-default-rtdb.asia-southeast1.firebasedatabase.app",
+  projectId: "shopping-list-aef6c",
+  storageBucket: "shopping-list-aef6c.firebasestorage.app",
+  messagingSenderId: "562087069205",
+  appId: "1:562087069205:web:6d2343738c37d7dd27b01c",
+};
+const fbApp  = initializeApp(firebaseConfig);
+const rtdb   = getDatabase(fbApp);
+const ITEMS_PATH = "shopping/family/items";
+const itemsRef   = ref(rtdb, ITEMS_PATH);
+const itemRef    = id => ref(rtdb, `${ITEMS_PATH}/${id}`);
+
+// 本地設定（username 等個人設定存本地）
+const loadLocal = () => { try { return JSON.parse(localStorage.getItem("shopLocal"))||{}; } catch { return {}; } };
+const saveLocal = d => localStorage.setItem("shopLocal", JSON.stringify(d));
 
 // ── 常數 ──────────────────────────────────────────────────────────────────────
 const P = {
@@ -863,47 +879,63 @@ export default function App() {
   const allCats     = [...CATS_DEFAULT,...custCats];
   const allCreators = [...new Set([...CREATORS_BUILTIN,...custCreators])];
 
-  // 載入本地資料
+ // 載入本地設定
   useEffect(()=>{
-    const db = loadDB();
-    if(db.items)        setItems(db.items);
-    if(db.custStores)   setCustStores(db.custStores);
-    if(db.custCats)     setCustCats(db.custCats);
-    if(db.custCreators) setCustCreators(db.custCreators);
-    if(db.username)     setUsername(db.username);
-    setSyncing(false);
+    const s = loadLocal();
+    if(s.username)     setUsername(s.username);
+    if(s.custStores)   setCustStores(s.custStores);
+    if(s.custCats)     setCustCats(s.custCats);
+    if(s.custCreators) setCustCreators(s.custCreators);
   },[]);
 
-  const saveItem = (item, addCatOnly=false) => {
+  // Firebase 即時同步
+  useEffect(()=>{
+    setSyncing(true);
+    const unsub = onValue(itemsRef,
+      snap => {
+        const val = snap.val();
+        const data = val ? Object.values(val) : [];
+        data.sort((a,b)=>(b.createdAt||"").localeCompare(a.createdAt||""));
+        setItems(data);
+        setSyncing(false);
+      },
+      err => { console.error(err); setSyncing(false); }
+    );
+    return ()=>unsub();
+  },[]);
+
+  const saveItem = async (item, addCatOnly=false) => {
     if(item._newCat&&!allCats.includes(item._newCat)) setCustCats(p=>[...p,item._newCat]);
     if(addCatOnly) return;
     const {_newCat,...clean}=item;
     if(clean.creator&&!allCreators.includes(clean.creator))
       setCustCreators(p=>[...p,clean.creator]);
-    setItems(prev=>{
-      const idx=prev.findIndex(i=>i.id===clean.id);
-      if(idx>=0){const n=[...prev];n[idx]=clean;return n;}
-      return [clean,...prev];
-    });
+    const data = JSON.parse(JSON.stringify(clean, (k,v)=>v===undefined?null:v));
+    if(data.image&&data.image.startsWith("data:")&&data.image.length>900000)
+      data.image = data.image.slice(0,900000);
+    await set(itemRef(clean.id), data);
     setShowForm(false); setEditItem(null);
   };
 
   const openEdit   = item => { setEditItem({...item}); setShowForm(true); };
   const markBought = item => setBoughtItem(item);
 
-  const confirmBought = fp => {
-    setItems(prev=>prev.map(i=>i.id===boughtItem.id
-      ?{...i,bought:true,boughtAt:today(),finalPrice:fp||i.price,
-          priceHistory:[...(i.priceHistory||[]),...(fp?[{price:Number(fp),date:today()}]:[])]}
-      :i));
+  const confirmBought = async fp => {
+    const updated = {...boughtItem, bought:true, boughtAt:today(),
+      finalPrice:fp||boughtItem.price,
+      priceHistory:[...(boughtItem.priceHistory||[]),...(fp?[{price:Number(fp),date:today()}]:[])]};
+    await set(itemRef(boughtItem.id), updated);
     setBoughtItem(null);
   };
 
-  const undoBought = id => setItems(prev=>prev.map(i=>i.id===id?{...i,bought:false}:i));
-  // 儲存到 localStorage
+  const undoBought = async id => {
+    const item = items.find(i=>i.id===id);
+    if(item) await set(itemRef(id),{...item,bought:false});
+  };
+// 儲存本地設定
   useEffect(()=>{
-    saveDB({items,custStores,custCats,custCreators,username});
-  },[items,custStores,custCats,custCreators,username]);
+    saveLocal({username,custStores,custCats,custCreators});
+  },[username,custStores,custCats,custCreators]);
 
   const setF   = (k,v) => setFilters(f=>({...f,[k]:v}));
   const toggleF = (k,v) => setFilters(f=>({...f,[k]:f[k].includes(v)?f[k].filter(x=>x!==v):[...f[k],v]}));
@@ -1097,9 +1129,9 @@ export default function App() {
                   <p style={{fontSize:11,color:P.muted}}>{[item.store,item.category].filter(Boolean).join(" · ")}</p>
                 </div>
                 {item.price&&<span style={{fontSize:12,color:P.accent,fontWeight:600}}>{fmtPrice(item.price)}</span>}
-                <Btn color={P.accent} onClick={()=>{
+                <Btn color={P.accent} onClick={async()=>{
                   const newItem={...item,id:uid(),bought:false,createdAt:today(),creator:username};
-                  setItems(p=>[newItem,...p]);
+                  await set(itemRef(newItem.id), newItem);
                 }} style={{padding:"5px 11px",fontSize:12}}>＋ 補貨</Btn>
               </div>
             ))}
@@ -1306,7 +1338,7 @@ export default function App() {
             <p style={{fontSize:12,color:P.muted,marginBottom:18}}>此動作無法復原</p>
             <div style={{display:"flex",gap:10,justifyContent:"center"}}>
               <Btn ghost color={P.muted} onClick={()=>setDelId(null)}>取消</Btn>
-              <Btn color={P.red} onClick={()=>{setItems(p=>p.filter(i=>i.id!==delId));setDelId(null);}}>刪除</Btn>
+              <Btn color={P.red} onClick={async()=>{await remove(itemRef(delId));setDelId(null);}}>刪除</Btn>
             </div>
           </div>
         </Overlay>
